@@ -53,7 +53,7 @@ func Request(method, url string, body io.Reader, headers map[string]string) (*ht
 	}
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   15 * time.Minute,
+		Timeout:   15 * time.Second,
 	}
 
 	req, err := http.NewRequest(method, url, body)

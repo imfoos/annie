@@ -16,6 +16,6 @@ require (
 	gopkg.in/sourcemap.v1 v1.0.5 // indirect
 )
 
-replace github.com/rylio/ytdl => github.com/mihaiav/ytdl v0.6.3-0.20200510100116-5f2bf8b4fec0
-
 replace github.com/cheggaaa/pb => github.com/imfoos/pb v1.0.28-r1
+
+replace github.com/rylio/ytdl => github.com/mihaiav/ytdl v0.6.3-0.20200510100116-5f2bf8b4fec0

@@ -31,6 +31,7 @@ type Options struct {
 	OutputName     string
 	FileNameLength int
 	Caption        bool
+	SinglePart     bool
 
 	MultiThread  bool
 	ThreadNumber int
@@ -49,10 +50,23 @@ type Downloader struct {
 	option Options
 }
 
-func progressBar(size int64) *pb.ProgressBar {
+type DownloadInfo struct {
+	Result    *pb.ProgressResult
+	FileName  string
+	FilePath  string
+	FullPath  string
+	PlayUrl   string
+	VideoSize int64
+}
+
+func progressBar(size int64, call pb.Callback) *pb.ProgressBar {
 	bar := pb.New64(size).SetUnits(pb.U_BYTES).SetRefreshRate(time.Millisecond * 10)
 	bar.ShowSpeed = true
 	bar.ShowFinalTime = true
+	bar.ShowElapsedTime = true
+	bar.AutoStat = true
+	bar.Units = pb.U_BYTES
+	bar.Callback = call
 	bar.SetMaxWidth(1000)
 	return bar
 }
@@ -110,26 +124,26 @@ func (downloader *Downloader) writeFile(url string, file *os.File, headers map[s
 	return written, nil
 }
 
-func (downloader *Downloader) save(part *types.Part, refer, fileName string) error {
+func (downloader *Downloader) save(part *types.Part, refer, fileName string) (string, error) {
 	filePath, err := utils.FilePath(fileName, part.Ext, downloader.option.FileNameLength, downloader.option.OutputPath, false)
 	if err != nil {
-		return err
+		return filePath, err
 	}
 	fileSize, exists, err := utils.FileSize(filePath)
 	if err != nil {
-		return err
+		return filePath, err
 	}
 	// Skip segment file
 	// TODO: Live video URLs will not return the size
 	if exists && fileSize == part.Size {
 		downloader.bar.Add64(fileSize)
-		return nil
+		return filePath, nil
 	}
 
 	tempFilePath := filePath + ".download"
 	tempFileSize, _, err := utils.FileSize(tempFilePath)
 	if err != nil {
-		return err
+		return filePath, err
 	}
 	headers := map[string]string{
 		"Referer": refer,
@@ -147,7 +161,7 @@ func (downloader *Downloader) save(part *types.Part, refer, fileName string) err
 		file, fileError = os.Create(tempFilePath)
 	}
 	if fileError != nil {
-		return fileError
+		return filePath, fileError
 	}
 
 	// close and rename temp file at the end of this function
@@ -182,7 +196,7 @@ func (downloader *Downloader) save(part *types.Part, refer, fileName string) err
 				if err == nil {
 					break
 				} else if i+1 >= downloader.option.RetryTimes {
-					return err
+					return filePath, err
 				}
 				temp += written
 				headers["Range"] = fmt.Sprintf("bytes=%d-%d", temp, end)
@@ -197,7 +211,7 @@ func (downloader *Downloader) save(part *types.Part, refer, fileName string) err
 			if err == nil {
 				break
 			} else if i+1 >= downloader.option.RetryTimes {
-				return err
+				return filePath, err
 			}
 			temp += written
 			headers["Range"] = fmt.Sprintf("bytes=%d-", temp)
@@ -205,7 +219,7 @@ func (downloader *Downloader) save(part *types.Part, refer, fileName string) err
 		}
 	}
 
-	return nil
+	return filePath, nil
 }
 
 func (downloader *Downloader) multiThreadSave(dataPart *types.Part, refer, fileName string) error {
@@ -528,11 +542,15 @@ func (downloader *Downloader) aria2(title string, stream *types.Stream) error {
 }
 
 // Download download urls
-func (downloader *Downloader) Download(data *types.Data) error {
+func (downloader *Downloader) Download(data *types.Data) (*DownloadInfo, error) {
+	return downloader.DownloadCallback(data, nil)
+}
+func (downloader *Downloader) DownloadCallback(data *types.Data, call pb.Callback) (*DownloadInfo, error) {
+
 	sortedStreams := genSortedStreams(data.Streams)
 	if downloader.option.InfoOnly {
 		printInfo(data, sortedStreams)
-		return nil
+		return nil, nil
 	}
 
 	title := downloader.option.OutputName
@@ -547,7 +565,7 @@ func (downloader *Downloader) Download(data *types.Data) error {
 	}
 	stream, ok := data.Streams[streamName]
 	if !ok {
-		return fmt.Errorf("no stream named %s", streamName)
+		return nil, fmt.Errorf("no stream named %s", streamName)
 	}
 
 	printStreamInfo(data, stream)
@@ -559,40 +577,54 @@ func (downloader *Downloader) Download(data *types.Data) error {
 
 	// Use aria2 rpc to download
 	if downloader.option.UseAria2RPC {
-		return downloader.aria2(title, stream)
+		return nil, downloader.aria2(title, stream)
 	}
 
 	// Skip the complete file that has been merged
 	mergedFilePath, err := utils.FilePath(title, stream.Ext, downloader.option.FileNameLength, downloader.option.OutputPath, false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	_, mergedFileExists, err := utils.FileSize(mergedFilePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// After the merge, the file size has changed, so we do not check whether the size matches
 	if mergedFileExists {
 		fmt.Printf("%s: file already exists, skipping\n", mergedFilePath)
-		return nil
+		return nil, nil
 	}
 
-	downloader.bar = progressBar(stream.Size)
+	downloader.bar = progressBar(stream.Size, call)
+	//downloader.bar.Callback = func(out string) {
+	//	fmt.Printf("out: %v \n", out)
+	//}
 	downloader.bar.Start()
-	if len(stream.Parts) == 1 {
+	if len(stream.Parts) == 1 || downloader.option.SinglePart {
+
+		downloader.bar.SetTotal64(stream.Parts[0].Size)
 		// only one fragment
 		var err error
+		var filePath string
 		if downloader.option.MultiThread {
 			err = downloader.multiThreadSave(stream.Parts[0], data.URL, title)
 		} else {
-			err = downloader.save(stream.Parts[0], data.URL, title)
+			filePath, err = downloader.save(stream.Parts[0], data.URL, title)
 		}
 
+		fmt.Println(filePath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		downloader.bar.Finish()
-		return nil
+		return &DownloadInfo{
+			Result:    downloader.bar.Result(),
+			FileName:  filePath,
+			FilePath:  "",
+			FullPath:  filePath,
+			PlayUrl:   stream.Parts[0].URL,
+			VideoSize: stream.Size,
+		}, nil
 	}
 
 	wgp := utils.NewWaitGroupPool(downloader.option.ThreadNumber)
@@ -608,14 +640,14 @@ func (downloader *Downloader) Download(data *types.Data) error {
 		partFileName := fmt.Sprintf("%s[%d]", title, index)
 		partFilePath, err := utils.FilePath(partFileName, part.Ext, downloader.option.FileNameLength, downloader.option.OutputPath, false)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		parts[index] = partFilePath
 
 		wgp.Add()
 		go func(part *types.Part, fileName string) {
 			defer wgp.Done()
-			err := downloader.save(part, data.URL, fileName)
+			_, err := downloader.save(part, data.URL, fileName)
 			if err != nil {
 				lock.Lock()
 				errs = append(errs, err)
@@ -625,17 +657,38 @@ func (downloader *Downloader) Download(data *types.Data) error {
 	}
 	wgp.Wait()
 	if len(errs) > 0 {
-		return errs[0]
+		return nil, errs[0]
 	}
 	downloader.bar.Finish()
 
 	if data.Type != types.DataTypeVideo {
-		return nil
+		return &DownloadInfo{
+			Result:    downloader.bar.Result(),
+			FileName:  mergedFilePath,
+			FilePath:  "",
+			FullPath:  mergedFilePath,
+			PlayUrl:   stream.Parts[0].URL,
+			VideoSize: stream.Size,
+		}, nil
 	}
 
 	fmt.Printf("Merging video parts into %s\n", mergedFilePath)
 	if stream.Ext != "mp4" || stream.NeedMux {
-		return utils.MergeFilesWithSameExtension(parts, mergedFilePath)
+		return &DownloadInfo{
+			Result:    downloader.bar.Result(),
+			FileName:  mergedFilePath,
+			FilePath:  "",
+			FullPath:  mergedFilePath,
+			PlayUrl:   stream.Parts[0].URL,
+			VideoSize: stream.Size,
+		}, utils.MergeFilesWithSameExtension(parts, mergedFilePath)
 	}
-	return utils.MergeToMP4(parts, mergedFilePath, title)
+	return &DownloadInfo{
+		Result:    downloader.bar.Result(),
+		FileName:  mergedFilePath,
+		FilePath:  "",
+		FullPath:  mergedFilePath,
+		PlayUrl:   stream.Parts[0].URL,
+		VideoSize: stream.Size,
+	}, utils.MergeToMP4(parts, mergedFilePath, title)
 }
